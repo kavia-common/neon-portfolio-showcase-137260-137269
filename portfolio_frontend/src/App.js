@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import "./index.css";
+import { createSupabaseClient } from "./supabaseClient";
 
 /**
  * PUBLIC_INTERFACE
@@ -312,6 +313,91 @@ function PortfolioCard({ title, tag, cover, icon }) {
 
 /** PUBLIC_INTERFACE */
 function Contact() {
+  // Local form state
+  const [form, setForm] = useState({ name: "", email: "", subject: "", message: "" });
+  const [status, setStatus] = useState({ type: "idle", msg: "" }); // 'idle' | 'loading' | 'success' | 'error'
+  const [incoming, setIncoming] = useState([]); // realtime demo list
+
+  // Create supabase client once
+  const supabase = useMemo(() => {
+    try {
+      return createSupabaseClient();
+    } catch (e) {
+      // If env vars are missing, we keep client null and show a hint under the form.
+      console.warn(e?.message || e);
+      return null;
+    }
+  }, []);
+
+  // Realtime subscription for new messages
+  useEffect(() => {
+    if (!supabase) return;
+
+    const channel = supabase
+      .channel("contact_messages_inserts")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "contact_messages" },
+        (payload) => {
+          // Push newest message to the top of the list for demo visibility
+          setIncoming((prev) => [payload.new, ...prev].slice(0, 5));
+        }
+      )
+      .subscribe((status) => {
+        // Optional: could handle 'SUBSCRIBED' status
+        // console.log("Realtime status:", status);
+      });
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [supabase]);
+
+  const onChange = (e) => {
+    const { id, value } = e.target;
+    setForm((f) => ({ ...f, [id]: value }));
+  };
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    if (!supabase) {
+      setStatus({ type: "error", msg: "Supabase is not configured. Please set the required environment variables." });
+      return;
+    }
+
+    // Basic validation
+    if (!form.name.trim() || !form.email.trim() || !form.message.trim()) {
+      setStatus({ type: "error", msg: "Please fill in your name, email, and message." });
+      return;
+    }
+
+    setStatus({ type: "loading", msg: "Sending..." });
+
+    try {
+      // Insert to contact_messages table
+      // Table columns expected: name, email, message, created_at (default now())
+      const { error } = await supabase.from("contact_messages").insert([
+        {
+          name: form.name.trim(),
+          email: form.email.trim(),
+          message: (form.subject ? `[${form.subject.trim()}] ` : "") + form.message.trim(),
+        },
+      ]);
+
+      if (error) {
+        throw error;
+      }
+
+      setStatus({ type: "success", msg: "Thanks! Your message has been sent." });
+      setForm({ name: "", email: "", subject: "", message: "" });
+    } catch (err) {
+      setStatus({
+        type: "error",
+        msg: err?.message || "Something went wrong while sending your message.",
+      });
+    }
+  };
+
   return (
     <section id="contact" className="py-20 bg-white">
       <div className="container-pro grid md:grid-cols-2 gap-10">
@@ -324,40 +410,77 @@ function Contact() {
             <p><i className="fa-solid fa-envelope text-secondary mr-2"></i> hello@designer.dev</p>
             <p><i className="fa-solid fa-location-dot text-secondary mr-2"></i> Remote / Worldwide</p>
           </div>
+
+          {/* Realtime demo feed */}
+          <div className="mt-8">
+            <h3 className="font-semibold text-text mb-2">Recent messages (Realtime)</h3>
+            <div className="space-y-2">
+              {incoming.length === 0 && (
+                <p className="text-sm text-gray-500">No recent messages yet. Submit the form to see realtime updates.</p>
+              )}
+              {incoming.map((m, idx) => (
+                <div key={m.id || idx} className="p-3 rounded-lg border border-gray-200 bg-white shadow-sm">
+                  <div className="text-sm font-semibold text-text">{m.name} <span className="text-gray-400">({m.email})</span></div>
+                  <div className="text-sm text-gray-700 mt-1">{m.message}</div>
+                  {m.created_at && (
+                    <div className="text-xs text-gray-400 mt-1">{new Date(m.created_at).toLocaleString()}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
 
-        <form
-          className="card p-6"
-          onSubmit={(e) => {
-            e.preventDefault();
-            alert("Thanks! Your message has been sent.");
-          }}
-        >
+        <form className="card p-6" onSubmit={onSubmit}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <Field label="Name" id="name" type="text" placeholder="Your name" />
-            <Field label="Email" id="email" type="email" placeholder="you@email.com" />
+            <Field label="Name" id="name" type="text" placeholder="Your name" value={form.name} onChange={onChange} />
+            <Field label="Email" id="email" type="email" placeholder="you@email.com" value={form.email} onChange={onChange} />
           </div>
-          <Field label="Subject" id="subject" type="text" placeholder="Project inquiry" className="mt-4" />
+          <Field label="Subject" id="subject" type="text" placeholder="Project inquiry" className="mt-4" value={form.subject} onChange={onChange} />
           <div className="mt-4">
             <label htmlFor="message" className="block text-sm font-semibold text-text mb-1">
               Message
             </label>
             <textarea
               id="message"
+              value={form.message}
+              onChange={onChange}
               className="w-full h-32 rounded-xl border border-gray-200 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary/50"
               placeholder="Tell me about your project..."
             />
           </div>
-          <button type="submit" className="btn-secondary mt-5 w-full sm:w-auto">
-            <i className="fa-solid fa-paper-plane mr-2" /> Send Message
+          <button
+            type="submit"
+            className="btn-secondary mt-5 w-full sm:w-auto disabled:opacity-60"
+            disabled={status.type === "loading"}
+          >
+            <i className="fa-solid fa-paper-plane mr-2" /> {status.type === "loading" ? "Sending..." : "Send Message"}
           </button>
+
+          {/* Status message */}
+          {status.type !== "idle" && (
+            <div
+              className={`mt-3 text-sm ${
+                status.type === "success" ? "text-green-700" : status.type === "error" ? "text-red-600" : "text-gray-600"
+              }`}
+            >
+              {status.msg}
+            </div>
+          )}
+
+          {/* Env hint when not configured */}
+          {!supabase && (
+            <div className="mt-3 text-xs text-red-600">
+              Supabase isn’t configured. Set REACT_APP_SUPABASE_URL and REACT_APP_SUPABASE_KEY in your environment.
+            </div>
+          )}
         </form>
       </div>
     </section>
   );
 }
 
-function Field({ label, id, type = "text", placeholder, className = "" }) {
+function Field({ label, id, type = "text", placeholder, className = "", value, onChange }) {
   return (
     <div className={className}>
       <label htmlFor={id} className="block text-sm font-semibold text-text mb-1">
@@ -367,6 +490,8 @@ function Field({ label, id, type = "text", placeholder, className = "" }) {
         id={id}
         type={type}
         placeholder={placeholder}
+        value={value}
+        onChange={onChange}
         className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2 outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary/50"
       />
     </div>
